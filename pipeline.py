@@ -3,27 +3,49 @@ from dotenv import load_dotenv
 
 import basedosdados as bd
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import seaborn as sns
 import folium
 
 from sklearn.cluster import KMeans
+from sklearn.preprocessing import MinMaxScaler
 from apyori import apriori
 
 import config
 
 load_dotenv()
 
+# =========================================================
+# CONFIGURAÇÕES
+# =========================================================
+
+COLUNAS_NUMERICAS = [
+    "latitude",
+    "longitude",
+    "risco_fogo",
+    "precipitacao",
+    "dias_sem_chuva"
+]
+
+FEATURES_CLUSTER = [
+    "latitude",
+    "longitude",
+    "risco_fogo_normalizado",
+    "dias_sem_chuva_normalizado",
+    "precipitacao_normalizado"
+]
+
 
 # =========================================================
-# CARREGAMENTO DOS DADOS
+# CARREGAMENTO E LIMPEZA
 # =========================================================
 
 def obter_dados():
 
     # =====================================================
-    # CARREGA DADOS
+    # CACHE
     # =====================================================
 
     if os.path.exists(config.ARQUIVO_PARQUET):
@@ -50,90 +72,82 @@ def obter_dados():
         )
 
     # =====================================================
-    # LIMPEZA
+    # CONVERSÃO NUMÉRICA (vetorizada)
     # =====================================================
 
-    colunas_importantes = [
-        "latitude",
-        "longitude",
-        "risco_fogo",
-        "precipitacao",
-        "dias_sem_chuva"
-    ]
-
-    df = df.dropna(subset=colunas_importantes)
-
-    # garante numérico
-    for coluna in colunas_importantes:
-
-        df[coluna] = pd.to_numeric(
-            df[coluna],
-            errors="coerce"
-        )
-
-    # remove infinito
-    df = df.replace(
-        [float("inf"), float("-inf")],
-        pd.NA
+    df[COLUNAS_NUMERICAS] = (
+        df[COLUNAS_NUMERICAS]
+        .apply(pd.to_numeric, errors="coerce")
+        .astype("float32")
     )
 
-    # remove NaN novamente
-    df = df.dropna(subset=colunas_importantes)
-
     # =====================================================
-    # COORDENADAS VÁLIDAS
+    # REMOVE NaN E INFINITOS
     # =====================================================
 
-    df = df[
-        (df["latitude"] >= -35) &
-        (df["latitude"] <= 10)
-    ]
-
-    df = df[
-        (df["longitude"] >= -75) &
-        (df["longitude"] <= -30)
-    ]
+    df = (
+        df
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna(subset=COLUNAS_NUMERICAS)
+    )
 
     # =====================================================
-    # LIMITES LÓGICOS
+    # FILTROS ÚNICOS
     # =====================================================
 
-    df = df[df["risco_fogo"] >= 0]
-    df = df[df["dias_sem_chuva"] >= 0]
-    df = df[df["precipitacao"] >= 0]
+    filtro = (
+
+        # coordenadas válidas
+        (df["latitude"].between(-35, 10)) &
+        (df["longitude"].between(-75, -30)) &
+
+        # limites lógicos
+        (df["risco_fogo"] >= 0) &
+        (df["dias_sem_chuva"] >= 0) &
+        (df["precipitacao"] >= 0)
+    )
+
+    df = df[filtro]
 
     # =====================================================
-    # REMOVER OUTLIERS
+    # OUTLIERS (máscara única)
     # =====================================================
 
-    colunas_numericas = [
+    mascara_outlier = pd.Series(True, index=df.index)
+
+    for coluna in [
         "precipitacao",
         "risco_fogo",
         "dias_sem_chuva"
-    ]
-
-    for coluna in colunas_numericas:
+    ]:
 
         q1 = df[coluna].quantile(0.01)
         q99 = df[coluna].quantile(0.99)
 
-        df = df[
-            (df[coluna] >= q1) &
-            (df[coluna] <= q99)
-        ]
+        mascara_outlier &= df[coluna].between(q1, q99)
+
+    df = df[mascara_outlier]
 
     # =====================================================
     # NORMALIZAÇÃO
     # =====================================================
 
-    for coluna in colunas_numericas:
+    scaler = MinMaxScaler()
 
-        minimo = df[coluna].min()
-        maximo = df[coluna].max()
+    colunas_normalizadas = [
+        "risco_fogo",
+        "dias_sem_chuva",
+        "precipitacao"
+    ]
+
+    dados_normalizados = scaler.fit_transform(
+        df[colunas_normalizadas]
+    )
+
+    for i, coluna in enumerate(colunas_normalizadas):
 
         df[f"{coluna}_normalizado"] = (
-            (df[coluna] - minimo)
-            / (maximo - minimo)
+            dados_normalizados[:, i].astype("float32")
         )
 
     # =====================================================
@@ -145,64 +159,28 @@ def obter_dados():
     print(f"Dados limpos: {len(df)}")
 
     return df
+
+
 # =========================================================
 # REGRA DO COTOVELO
 # =========================================================
 
-def encontrar_k_ideal(df, max_clusters=10):
-    """
-    Usa regra do cotovelo para descobrir o melhor K.
-    """
-
-    # ==========================================
-    # FEATURES DO CLUSTER
-    # ==========================================
-
-    X = df[
-        [
-            "latitude",
-            "longitude",
-            "risco_fogo_normalizado",
-            "dias_sem_chuva_normalizado",
-            "precipitacao_normalizado"
-        ]
-    ].copy()
-
-    # ==========================================
-    # GARANTE NUMÉRICO
-    # ==========================================
-
-    for coluna in X.columns:
-
-        X[coluna] = pd.to_numeric(
-            X[coluna],
-            errors="coerce"
-        )
-
-    # ==========================================
-    # REMOVE NaN E INFINITO
-    # ==========================================
-
-    X = X.replace(
-        [float("inf"), float("-inf")],
-        pd.NA
-    )
-
-    X = X.dropna()
-
-    # ==========================================
-    # SEGURANÇA
-    # ==========================================
+def encontrar_k_ideal(X, max_clusters=10):
 
     if len(X) < 2:
 
-        print("Poucos dados válidos para KMeans.")
-
         return 2
 
-    # ==========================================
-    # REGRA DO COTOVELO
-    # ==========================================
+    # =====================================================
+    # AMOSTRA PARA PERFORMANCE
+    # =====================================================
+
+    if len(X) > 5000:
+
+        X = X.sample(
+            n=5000,
+            random_state=42
+        )
 
     inercias = []
 
@@ -213,32 +191,24 @@ def encontrar_k_ideal(df, max_clusters=10):
         modelo = KMeans(
             n_clusters=k,
             random_state=42,
-            n_init=10
+            n_init=5
         )
 
         modelo.fit(X)
 
         inercias.append(modelo.inertia_)
 
-    # ==========================================
+    # =====================================================
     # MELHOR K
-    # ==========================================
+    # =====================================================
 
-    diferencas = []
+    diferencas = np.diff(inercias) * -1
 
-    for i in range(1, len(inercias)):
+    melhor_k = int(np.argmax(diferencas) + 2)
 
-        diferencas.append(
-            inercias[i - 1] - inercias[i]
-        )
-
-    melhor_k = (
-        diferencas.index(max(diferencas)) + 2
-    )
-
-    # ==========================================
+    # =====================================================
     # GRÁFICO
-    # ==========================================
+    # =====================================================
 
     plt.figure(figsize=(8, 5))
 
@@ -248,7 +218,7 @@ def encontrar_k_ideal(df, max_clusters=10):
         marker="o"
     )
 
-    plt.xlabel("Número de Clusters (K)")
+    plt.xlabel("Número de Clusters")
     plt.ylabel("Inércia")
     plt.title("Regra do Cotovelo")
 
@@ -259,100 +229,44 @@ def encontrar_k_ideal(df, max_clusters=10):
     print(f"Melhor K encontrado: {melhor_k}")
 
     return melhor_k
+
+
 # =========================================================
 # KMEANS + MAPA
 # =========================================================
 
 def gerar_mapas_kmeans(df):
-    """
-    Aplica KMeans usando automaticamente
-    o K encontrado pela regra do cotovelo.
-    """
 
     for ano_alvo in sorted(df["ano"].unique()):
 
         print(f"\nProcessando ano {ano_alvo}...")
 
-        df_ano = df[df["ano"] == ano_alvo].copy()
+        df_ano = df[df["ano"] == ano_alvo]
 
-        # ==========================================
-        # GARANTE NUMÉRICO
-        # ==========================================
-
-        df_ano["latitude"] = pd.to_numeric(
-            df_ano["latitude"],
-            errors="coerce"
-        )
-
-        df_ano["longitude"] = pd.to_numeric(
-            df_ano["longitude"],
-            errors="coerce"
-        )
-
-        # ==========================================
-        # REMOVE NAN
-        # ==========================================
-
-        df_ano = df_ano.dropna(
-            subset=["latitude", "longitude"]
-        )
-
-        # ==========================================
-        # REMOVE INFINITO
-        # ==========================================
-
-        df_ano = df_ano[
-            ~df_ano["latitude"].isin([float("inf"), float("-inf")])
-        ]
-
-        df_ano = df_ano[
-            ~df_ano["longitude"].isin([float("inf"), float("-inf")])
-        ]
-
-        # ==========================================
-        # AMOSTRAGEM
-        # ==========================================
+        # =====================================================
+        # AMOSTRAGEM POR ESTADO
+        # =====================================================
 
         df_amostra = (
-            df_ano.groupby("sigla_uf", group_keys=False)
-            .apply(
-                lambda x: x.sample(
-                    n=min(len(x), config.FOCOS_POR_ESTADO),
+                df_ano
+                .groupby("sigla_uf", group_keys=False)
+                .sample(
+                    frac=1,
                     random_state=42
                 )
-            )
-        )
-
-        # ==========================================
-        # MATRIZ KMEANS
-        # ==========================================
-
-        X = df_amostra[
-            [
-                "latitude",
-                "longitude",
-                "risco_fogo_normalizado",
-                "dias_sem_chuva_normalizado",
-                "precipitacao_normalizado"
-            ]
-        ].copy()
-
-        # garante numérico
-        for coluna in X.columns:
-
-            X[coluna] = pd.to_numeric(
-                X[coluna],
-                errors="coerce"
+                .groupby("sigla_uf", group_keys=False)
+                .head(config.FOCOS_POR_ESTADO)
             )
 
-        # remove infinito
-        X = X.replace(
-            [float("inf"), float("-inf")],
-            pd.NA
-        )
+        # =====================================================
+        # FEATURES
+        # =====================================================
 
-        # remove NaN
-        X = X.dropna()
+        X = (
+            df_amostra[FEATURES_CLUSTER]
+            .replace([np.inf, -np.inf], np.nan)
+            .dropna()
+        )
 
         if len(X) < 2:
 
@@ -360,17 +274,15 @@ def gerar_mapas_kmeans(df):
 
             continue
 
-        # ==========================================
-        # REGRA DO COTOVELO
-        # ==========================================
+        # =====================================================
+        # K IDEAL
+        # =====================================================
 
-        melhor_k = encontrar_k_ideal(df_amostra)
+        melhor_k = encontrar_k_ideal(X)
 
-        print(f"K ideal encontrado: {melhor_k}")
-
-        # ==========================================
+        # =====================================================
         # KMEANS
-        # ==========================================
+        # =====================================================
 
         modelo = KMeans(
             n_clusters=melhor_k,
@@ -380,15 +292,15 @@ def gerar_mapas_kmeans(df):
 
         clusters = modelo.fit_predict(X)
 
-        df_amostra = df_amostra.loc[X.index].copy()
+        df_amostra = df_amostra.loc[X.index]
 
         df_amostra["cluster"] = clusters
 
         centroides = modelo.cluster_centers_
 
-        # ==========================================
+        # =====================================================
         # MAPA
-        # ==========================================
+        # =====================================================
 
         mapa = folium.Map(
             location=[-14.2350, -51.9253],
@@ -396,38 +308,39 @@ def gerar_mapas_kmeans(df):
             tiles="cartodbpositron"
         )
 
-        for _, linha in df_amostra.iterrows():
+        # itertuples é MUITO mais rápido
+        for linha in df_amostra.itertuples():
 
-            cluster = int(linha["cluster"])
+            cluster = int(linha.cluster)
 
             cor = config.CORES_CLUSTERS[
                 cluster % len(config.CORES_CLUSTERS)
             ]
 
             popup = (
-                f"<b>{linha['id_municipio_nome']} - "
-                f"{linha['sigla_uf']}</b><br>"
+                f"<b>{linha.id_municipio_nome} - "
+                f"{linha.sigla_uf}</b><br>"
                 f"Cluster: {cluster}<br>"
-                f"Dias sem chuva: {linha['dias_sem_chuva']}"
+                f"Dias sem chuva: {linha.dias_sem_chuva}"
             )
 
             folium.CircleMarker(
                 location=[
-                    linha["latitude"],
-                    linha["longitude"]
+                    linha.latitude,
+                    linha.longitude
                 ],
-                radius=2.5,
+                radius=2,
                 popup=popup,
                 color=cor,
                 fill=True,
                 fill_color=cor,
-                fill_opacity=0.6,
+                fill_opacity=0.5,
                 weight=0
             ).add_to(mapa)
 
-        # ==========================================
+        # =====================================================
         # CENTRÓIDES
-        # ==========================================
+        # =====================================================
 
         for idx, centro in enumerate(centroides):
 
@@ -446,6 +359,7 @@ def gerar_mapas_kmeans(df):
         mapa.save(nome_arquivo)
 
         print(f"Mapa salvo: {nome_arquivo}")
+
 
 # =========================================================
 # GRÁFICOS
@@ -469,39 +383,24 @@ def plotar_graficos(df):
 
         df_ano = df[df["ano"] == ano]
 
+        contagem = (
+            df_ano["sigla_uf"]
+            .value_counts()
+            .sort_values(ascending=False)
+        )
+
         plt.figure(figsize=(15, 6))
 
-        ordem = df_ano["sigla_uf"].value_counts().index
-
-        ax = sns.countplot(
-            data=df_ano,
-            x="sigla_uf",
-            order=ordem,
-            color="#D32F2F"
+        ax = plt.bar(
+            contagem.index,
+            contagem.values
         )
 
-        ax.set_yscale("log")
+        plt.yscale("log")
 
-        ax.yaxis.set_major_formatter(
+        plt.gca().yaxis.set_major_formatter(
             ticker.FuncFormatter(formatar_y)
         )
-
-        for p in ax.patches:
-
-            valor = int(p.get_height())
-
-            if valor <= 0:
-                continue
-
-            ax.text(
-                p.get_x() + p.get_width() / 2,
-                valor,
-                f"{valor:,}".replace(",", "."),
-                ha="center",
-                va="bottom",
-                fontsize=8,
-                rotation=90
-            )
 
         plt.title(f"Focos de Queimada por Estado ({ano})")
 
@@ -520,16 +419,12 @@ def plotar_graficos(df):
 # =========================================================
 
 def preparar_dados_apriori(df):
-    """
-    Cria categorias climáticas simples e interpretáveis.
-    """
 
     df = df.copy()
 
-    # Precipitação
     df["categoria_chuva"] = pd.cut(
         df["precipitacao"],
-        bins=[-1, 1, 10, float("inf")],
+        bins=[-1, 1, 10, np.inf],
         labels=[
             "chuva_baixa",
             "chuva_media",
@@ -537,10 +432,9 @@ def preparar_dados_apriori(df):
         ]
     )
 
-    # Dias sem chuva
     df["categoria_seca"] = pd.cut(
         df["dias_sem_chuva"],
-        bins=[-1, 7, 15, float("inf")],
+        bins=[-1, 7, 15, np.inf],
         labels=[
             "seca_baixa",
             "seca_media",
@@ -548,10 +442,9 @@ def preparar_dados_apriori(df):
         ]
     )
 
-    # Risco de fogo
     df["categoria_risco"] = pd.cut(
         df["risco_fogo"],
-        bins=[-1, 0.3, 0.7, float("inf")],
+        bins=[-1, 0.3, 0.7, np.inf],
         labels=[
             "risco_baixo",
             "risco_medio",
@@ -574,29 +467,36 @@ def preparar_dados_apriori(df):
 
 def minerar_regras(df):
 
-    """
-    Descobre padrões climáticos relacionados
-    ao risco alto de fogo.
-    """
+    print("Preparando Apriori...")
 
     df = preparar_dados_apriori(df)
 
-    transacoes = []
+    # =====================================================
+    # LIMITA AMOSTRA PARA PERFORMANCE
+    # =====================================================
 
-    for _, linha in df.iterrows():
+    if len(df) > 50000:
 
-        transacao = [
+        df = df.sample(
+            n=50000,
+            random_state=42
+        )
 
-            f"chuva={linha['categoria_chuva']}",
+    # =====================================================
+    # TRANSAÇÕES (mais rápido)
+    # =====================================================
 
-            f"seca={linha['categoria_seca']}",
+    transacoes = [
 
-            f"bioma={linha['bioma']}",
-
-            f"risco={linha['categoria_risco']}"
+        [
+            f"chuva={linha.categoria_chuva}",
+            f"seca={linha.categoria_seca}",
+            f"bioma={linha.bioma}",
+            f"risco={linha.categoria_risco}"
         ]
 
-        transacoes.append(transacao)
+        for linha in df.itertuples()
+    ]
 
     regras = apriori(
         transacoes,
@@ -611,22 +511,20 @@ def minerar_regras(df):
 
         for estatistica in regra.ordered_statistics:
 
-            antecedente = list(estatistica.items_base)
-
             consequente = list(estatistica.items_add)
 
-            if not consequente:
-                continue
-
-            # Só queremos regras que levam a risco alto
             if "risco=risco_alto" not in consequente:
                 continue
 
             resultados.append({
 
-                "antecedente": ", ".join(antecedente),
+                "antecedente": ", ".join(
+                    estatistica.items_base
+                ),
 
-                "consequente": ", ".join(consequente),
+                "consequente": ", ".join(
+                    consequente
+                ),
 
                 "suporte": round(regra.support, 4),
 
@@ -656,16 +554,16 @@ def minerar_regras(df):
 
     print("\nTOP 10 REGRAS CLIMÁTICAS:\n")
 
-    for _, linha in df_regras.head(10).iterrows():
+    for linha in df_regras.head(10).itertuples():
 
-        print(f"SE: {linha['antecedente']}")
+        print(f"SE: {linha.antecedente}")
 
-        print(f"ENTÃO: {linha['consequente']}")
+        print(f"ENTÃO: {linha.consequente}")
 
         print(
-            f"Suporte={linha['suporte']} | "
-            f"Confiança={linha['confianca']} | "
-            f"Lift={linha['lift']}"
+            f"Suporte={linha.suporte} | "
+            f"Confiança={linha.confianca} | "
+            f"Lift={linha.lift}"
         )
 
         print("-" * 60)

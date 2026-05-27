@@ -1,0 +1,17 @@
+antecedente,consequente,suporte,confianca,lift
+"chuva=chuva_baixa, bioma=Cerrado","risco=risco_alto, seca=seca_alta",0.1759,0.6378,1.5184
+bioma=Cerrado,"risco=risco_alto, chuva=chuva_baixa, seca=seca_alta",0.1759,0.6045,1.4581
+bioma=Cerrado,"risco=risco_alto, seca=seca_alta",0.1775,0.6097,1.4517
+"seca=seca_alta, bioma=Cerrado","risco=risco_alto, chuva=chuva_baixa",0.1759,0.9562,1.3499
+"chuva=chuva_baixa, bioma=Cerrado, seca=seca_alta",risco=risco_alto,0.1759,0.9688,1.3324
+"seca=seca_alta, bioma=Cerrado",risco=risco_alto,0.1775,0.9646,1.3266
+seca=seca_alta,"risco=risco_alto, chuva=chuva_baixa",0.4145,0.9273,1.3091
+"chuva=chuva_baixa, seca=seca_alta",risco=risco_alto,0.4145,0.9491,1.3053
+seca=seca_alta,risco=risco_alto,0.42,0.9396,1.2922
+"chuva=chuva_baixa, seca=seca_alta, bioma=Amazônia",risco=risco_alto,0.1681,0.9181,1.2626
+"seca=seca_alta, bioma=Amazônia","risco=risco_alto, chuva=chuva_baixa",0.1681,0.8872,1.2524
+"bioma=Caatinga, chuva=chuva_baixa",risco=risco_alto,0.0524,0.9025,1.2412
+"seca=seca_alta, bioma=Amazônia",risco=risco_alto,0.1709,0.9021,1.2406
+bioma=Caatinga,"risco=risco_alto, chuva=chuva_baixa",0.0524,0.8626,1.2178
+"chuva=chuva_baixa, bioma=Cerrado",risco=risco_alto,0.2435,0.8827,1.2139
+bioma=Caatinga,risco=risco_alto,0.0535,0.8814,1.2122
