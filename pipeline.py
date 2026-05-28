@@ -422,6 +422,10 @@ def preparar_dados_apriori(df):
 
     df = df.copy()
 
+    # =====================================================
+    # CHUVA
+    # =====================================================
+
     df["categoria_chuva"] = pd.cut(
         df["precipitacao"],
         bins=[-1, 1, 10, np.inf],
@@ -431,6 +435,10 @@ def preparar_dados_apriori(df):
             "chuva_alta"
         ]
     )
+
+    # =====================================================
+    # SECA
+    # =====================================================
 
     df["categoria_seca"] = pd.cut(
         df["dias_sem_chuva"],
@@ -442,6 +450,10 @@ def preparar_dados_apriori(df):
         ]
     )
 
+    # =====================================================
+    # RISCO
+    # =====================================================
+
     df["categoria_risco"] = pd.cut(
         df["risco_fogo"],
         bins=[-1, 0.3, 0.7, np.inf],
@@ -452,11 +464,58 @@ def preparar_dados_apriori(df):
         ]
     )
 
+    # =====================================================
+    # POTÊNCIA DO FOGO
+    # =====================================================
+
+    df["categoria_potencia"] = pd.cut(
+        df["potencia_radiativa_fogo"],
+        bins=[-1, 10, 50, np.inf],
+        labels=[
+            "potencia_baixa",
+            "potencia_media",
+            "potencia_alta"
+        ]
+    )
+
+    # =====================================================
+    # ESTAÇÃO DO ANO
+    # =====================================================
+
+    mapa_estacoes = {
+
+        12: "verao",
+        1: "verao",
+        2: "verao",
+
+        3: "outono",
+        4: "outono",
+        5: "outono",
+
+        6: "inverno",
+        7: "inverno",
+        8: "inverno",
+
+        9: "primavera",
+        10: "primavera",
+        11: "primavera"
+    }
+
+    df["estacao"] = df["mes"].map(
+        mapa_estacoes
+    )
+
+    # =====================================================
+    # REMOVE NULOS
+    # =====================================================
+
     return df.dropna(
         subset=[
             "categoria_chuva",
             "categoria_seca",
-            "categoria_risco"
+            "categoria_risco",
+            "categoria_potencia",
+            "estacao"
         ]
     )
 
@@ -472,7 +531,7 @@ def minerar_regras(df):
     df = preparar_dados_apriori(df)
 
     # =====================================================
-    # LIMITA AMOSTRA PARA PERFORMANCE
+    # LIMITA AMOSTRA
     # =====================================================
 
     if len(df) > 50000:
@@ -483,50 +542,126 @@ def minerar_regras(df):
         )
 
     # =====================================================
-    # TRANSAÇÕES (mais rápido)
+    # TRANSAÇÕES
     # =====================================================
 
     transacoes = [
 
         [
+
             f"chuva={linha.categoria_chuva}",
+
             f"seca={linha.categoria_seca}",
+
             f"bioma={linha.bioma}",
+
+            f"potencia={linha.categoria_potencia}",
+
+            f"estacao={linha.estacao}",
+
             f"risco={linha.categoria_risco}"
+
         ]
 
         for linha in df.itertuples()
     ]
 
+    # =====================================================
+    # APRIORI
+    # =====================================================
+
     regras = apriori(
+
         transacoes,
-        min_support=0.05,
-        min_confidence=0.6,
-        min_lift=1.2
+
+        min_support=0.015,
+
+        min_confidence=0.7,
+
+        min_lift=1.3
     )
 
     resultados = []
+
+    regras_unicas = set()
+
+    # =====================================================
+    # FILTRA REGRAS
+    # =====================================================
 
     for regra in regras:
 
         for estatistica in regra.ordered_statistics:
 
-            consequente = list(estatistica.items_add)
+            antecedente = list(
+                estatistica.items_base
+            )
 
-            if "risco=risco_alto" not in consequente:
+            consequente = list(
+                estatistica.items_add
+            )
+
+            # =============================================
+            # REGRAS VAZIAS
+            # =============================================
+
+            if len(antecedente) == 0:
                 continue
+
+            # =============================================
+            # QUEREMOS MAIS CONTEXTO
+            # =============================================
+
+            if len(antecedente) < 2:
+                continue
+
+            # máximo 3 antecedentes
+            if len(antecedente) > 3:
+                continue
+
+            # apenas 1 consequente
+            if len(consequente) != 1:
+                continue
+
+            # =============================================
+            # CONSEQUENTE
+            # =============================================
+
+            if consequente[0] != "risco=risco_alto":
+                continue
+
+            # =============================================
+            # EVITA DUPLICADAS
+            # =============================================
+
+            antecedente = sorted(
+                antecedente
+            )
+
+            chave_regra = (
+                tuple(antecedente),
+                consequente[0]
+            )
+
+            if chave_regra in regras_unicas:
+                continue
+
+            regras_unicas.add(
+                chave_regra
+            )
 
             resultados.append({
 
-                "antecedente": ", ".join(
-                    estatistica.items_base
+                "antecedente": " + ".join(
+                    antecedente
                 ),
 
-                "consequente": ", ".join(
-                    consequente
-                ),
+                "consequente": consequente[0],
 
-                "suporte": round(regra.support, 4),
+                "suporte": round(
+                    regra.support,
+                    4
+                ),
 
                 "confianca": round(
                     estatistica.confidence,
@@ -536,10 +671,20 @@ def minerar_regras(df):
                 "lift": round(
                     estatistica.lift,
                     4
+                ),
+
+                "tamanho_regra": len(
+                    antecedente
                 )
             })
 
-    df_regras = pd.DataFrame(resultados)
+    # =====================================================
+    # DATAFRAME
+    # =====================================================
+
+    df_regras = pd.DataFrame(
+        resultados
+    )
 
     if df_regras.empty:
 
@@ -547,10 +692,33 @@ def minerar_regras(df):
 
         return df_regras
 
+    # =====================================================
+    # PRIORIZAÇÃO
+    # =====================================================
+
     df_regras = df_regras.sort_values(
-        by=["lift", "confianca"],
-        ascending=False
+
+        by=[
+            "confianca",
+            "lift",
+            "suporte"
+        ],
+
+        ascending=[
+            False,
+            False,
+            False
+        ]
     )
+
+    # remove auxiliar
+    df_regras = df_regras.drop(
+        columns=["tamanho_regra"]
+    )
+
+    # =====================================================
+    # TOP REGRAS
+    # =====================================================
 
     print("\nTOP 10 REGRAS CLIMÁTICAS:\n")
 
@@ -561,9 +729,9 @@ def minerar_regras(df):
         print(f"ENTÃO: {linha.consequente}")
 
         print(
-            f"Suporte={linha.suporte} | "
-            f"Confiança={linha.confianca} | "
-            f"Lift={linha.lift}"
+            f"Confiança: {linha.confianca} | "
+            f"Lift: {linha.lift} | "
+            f"Suporte: {linha.suporte}"
         )
 
         print("-" * 60)
